@@ -1953,13 +1953,13 @@ def _sm120_fp8_gemm_tma_path_supported(
     scale_b: torch.Tensor,
     out: torch.Tensor,
 ) -> bool:
-    """Whether the per-tensor SM120 FP8 kernel can run ``a @ b`` as given.
+    """Whether the per-tensor SM120 FP8 kernel can compute ``a @ b``.
 
-    The kernel reads A and D row-major and B column-major through TMA, so the
-    operands must be contiguous in that layout with 16-byte aligned rows and
-    base addresses, and both scales must be single floats.
+    The kernel needs e4m3 operands, single-float scales and 16-byte aligned
+    rows (K % 16 == 0, N % 8 == 0). Layout is not checked here: operands that
+    are not contiguous and 16-byte aligned in the kernel's layout are copied by
+    ``_sm120_fp8_gemm_dense_operands``.
     """
-    b_t = b.transpose(-2, -1)
     return (
         a.dtype == torch.float8_e4m3fn
         and b.dtype == torch.float8_e4m3fn
@@ -1967,15 +1967,35 @@ def _sm120_fp8_gemm_tma_path_supported(
         and scale_b.numel() == 1
         and scale_a.dtype == torch.float32
         and scale_b.dtype == torch.float32
-        and a.is_contiguous()
-        and b_t.is_contiguous()
-        and out.is_contiguous()
         and a.shape[-1] % 16 == 0
-        and b_t.shape[-2] % 8 == 0
-        and a.data_ptr() % 16 == 0
-        and b.data_ptr() % 16 == 0
-        and out.data_ptr() % 16 == 0
+        and b.shape[-1] % 8 == 0
     )
+
+
+def _sm120_fp8_gemm_dense_operands(
+    a: torch.Tensor, b: torch.Tensor, out: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """A and D row-major, B column-major, each contiguous and 16-byte aligned.
+
+    Both SM120 kernels address operands as packed and ignore strides, so a
+    strided or offset view must be copied first. Returns ``(a, b, d)`` with the
+    same logical shapes; ``d`` is ``out`` itself when it is already dense.
+    """
+
+    def dense(x: torch.Tensor) -> bool:
+        return x.is_contiguous() and x.data_ptr() % 16 == 0
+
+    if not dense(a):
+        a = a.clone(memory_format=torch.contiguous_format)
+    b_t = b.transpose(-2, -1)
+    if not dense(b_t):
+        b = b_t.clone(memory_format=torch.contiguous_format).transpose(-2, -1)
+    d = (
+        out
+        if dense(out)
+        else torch.empty_like(out, memory_format=torch.contiguous_format)
+    )
+    return a, b, d
 
 
 def _sm120_groupwise_fp8_gemm(inputs: List[torch.Tensor]) -> torch.Tensor:
@@ -2148,18 +2168,28 @@ def get_gemm_sm120_module_cutlass_fp8():
                 **kwargs,
             ) -> torch.Tensor:
                 a, b, scale_a, scale_b, out, workspace_buffer = inputs
-                if not _sm120_fp8_gemm_tma_path_supported(a, b, scale_a, scale_b, out):
-                    return _sm120_groupwise_fp8_gemm(inputs)
-                # tactic -1 lets the kernel pick a tile from M.
-                module.fp8_gemm(
-                    a,
-                    b.transpose(-2, -1),
-                    scale_a,
-                    scale_b,
-                    out,
-                    workspace_buffer,
-                    tactic,
-                )
+                if out.numel() == 0:
+                    return out
+                if a.shape[-1] == 0:
+                    return out.zero_()
+                a, b, d = _sm120_fp8_gemm_dense_operands(a, b, out)
+                if _sm120_fp8_gemm_tma_path_supported(a, b, scale_a, scale_b, d):
+                    # tactic -1 lets the kernel pick a tile from M.
+                    module.fp8_gemm(
+                        a,
+                        b.transpose(-2, -1),
+                        scale_a,
+                        scale_b,
+                        d,
+                        workspace_buffer,
+                        tactic,
+                    )
+                else:
+                    _sm120_groupwise_fp8_gemm(
+                        [a, b, scale_a, scale_b, d, workspace_buffer]
+                    )
+                if d is not out:
+                    out.copy_(d)
                 return out
 
         return CutlassFp8GemmRunner()

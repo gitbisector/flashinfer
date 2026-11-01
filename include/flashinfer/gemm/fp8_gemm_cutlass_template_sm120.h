@@ -16,6 +16,8 @@
 #ifndef FLASHINFER_FP8_GEMM_CUTLASS_TEMPLATE_SM120_H_
 #define FLASHINFER_FP8_GEMM_CUTLASS_TEMPLATE_SM120_H_
 
+#include <cuda_fp8.h>
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -27,10 +29,17 @@
 
 #include "flashinfer/gemm/cutlass_gemm_configs.h"
 #include "flashinfer/gemm/fp8_gemm_cutlass.h"
-#include "flashinfer/gemm/fp8_gemm_template_sm120.h"
 
 namespace flashinfer {
 namespace gemm {
+
+// Defined in fp8_gemm_template_sm120.h and instantiated once per tile in the
+// generated fp8_gemm_cutlass_sm120_*.cu files, so this TU compiles no kernels.
+template <typename T, int32_t CTA_M_, int32_t CTA_N_, int32_t CTA_K_>
+size_t genericFp8GemmKernelLauncherSm120(__nv_fp8_e4m3 const* A, __nv_fp8_e4m3 const* B,
+                                         float const* scale_a, float const* scale_b, T* D, int m,
+                                         int n, int k, int b, char* workspacePtr,
+                                         size_t const workspaceBytes, cudaStream_t stream);
 
 template <typename T>
 size_t dispatchFp8GemmCTAShapeSm120(__nv_fp8_e4m3 const* A, __nv_fp8_e4m3 const* B,

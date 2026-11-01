@@ -187,11 +187,13 @@ def test_bmm_fp8(b, m, n, k, input_dtype, mat2_dtype, res_dtype, backend, auto_t
     [
         (1, 1, 10304, 2688, "tma"),  # decode M, N not a multiple of 128
         (2, 300, 4096, 1024, "tma"),  # prefill M, batched
+        (1, 16, 4104, 2064, "tma"),  # partial K tile, partial N tile for 64-wide tiles
         (1, 4, 2048, 1000, "fallback"),  # K % 16 != 0
         (1, 4, 2044, 1024, "fallback"),  # N % 8 != 0
     ],
 )
-def test_bmm_fp8_cutlass_sm120_tactics(b, m, n, k, layout):
+@pytest.mark.parametrize("res_dtype", [torch.bfloat16, torch.float16])
+def test_bmm_fp8_cutlass_sm120_tactics(b, m, n, k, layout, res_dtype):
     # Regression anchor for the SM120 CUTLASS runner: every tactic of the per-tensor
     # kernel, and the groupwise fallback for inputs that kernel cannot take. The
     # fuzzer only runs the default tactic and the autotune winner.
@@ -213,7 +215,7 @@ def test_bmm_fp8_cutlass_sm120_tactics(b, m, n, k, layout):
         input_fp8.to(torch.bfloat16), mat2_fp8.to(torch.bfloat16)
     ).float() * (input_inv_s * mat2_inv_s)
 
-    res = torch.empty([b, m, n], device="cuda", dtype=torch.bfloat16)
+    res = torch.empty([b, m, n], device="cuda", dtype=res_dtype)
     workspace = _get_cache_buf("bmm_fp8_workspace", DEFAULT_WORKSPACE_SIZE, res.device)
     inputs = [input_fp8, mat2_fp8, input_inv_s, mat2_inv_s, res, workspace]
     assert _sm120_fp8_gemm_tma_path_supported(*inputs[:5]) == (layout == "tma")
@@ -225,6 +227,72 @@ def test_bmm_fp8_cutlass_sm120_tactics(b, m, n, k, layout):
         res.fill_(float("nan"))
         runner.forward(inputs, tactic=tactic)
         torch.testing.assert_close(res.float(), reference, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.parametrize(
+    "operand", ["a_col_major", "a_offset", "b_row_major", "out_col_major"]
+)
+def test_bmm_fp8_cutlass_sm120_strided_operands(operand):
+    # Both SM120 kernels address operands as packed, so strided or misaligned
+    # views must be copied rather than read as dense. N and K are multiples of
+    # 128, where the groupwise path used to skip its padding copy.
+    if get_compute_capability(torch.device("cuda"))[0] != 12:
+        pytest.skip("SM120/SM121 only")
+    torch.manual_seed(0)
+    b, m, n, k = 1, 64, 256, 256
+    input = torch.randn([b, m, k], device="cuda", dtype=torch.bfloat16)
+    input_fp8, input_inv_s = to_float8(input, dtype=torch.float8_e4m3fn)
+    mat2 = torch.randn([b, n, k], device="cuda", dtype=torch.bfloat16).transpose(-2, -1)
+    mat2_fp8, mat2_inv_s = to_float8(mat2, dtype=torch.float8_e4m3fn)
+    reference = torch.bmm(
+        input_fp8.to(torch.bfloat16), mat2_fp8.to(torch.bfloat16)
+    ).float() * (input_inv_s * mat2_inv_s)
+
+    if operand == "a_col_major":
+        input_fp8 = input_fp8.transpose(-2, -1).contiguous().transpose(-2, -1)
+    elif operand == "a_offset":
+        buf = torch.empty(b * m * k + 1, device="cuda", dtype=torch.float8_e4m3fn)
+        input_fp8 = buf[1:].view(b, m, k).copy_(input_fp8)
+    elif operand == "b_row_major":
+        mat2_fp8 = mat2_fp8.contiguous()
+    if operand == "out_col_major":
+        res = torch.empty([b, n, m], device="cuda", dtype=torch.bfloat16).transpose(
+            -2, -1
+        )
+    else:
+        res = torch.empty([b, m, n], device="cuda", dtype=torch.bfloat16)
+
+    bmm_fp8(
+        input_fp8,
+        mat2_fp8,
+        input_inv_s,
+        mat2_inv_s,
+        torch.bfloat16,
+        res,
+        backend="cutlass",
+    )
+    torch.testing.assert_close(res.float(), reference, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.parametrize("m, k", [(0, 256), (4, 0)])
+def test_bmm_fp8_cutlass_sm120_empty(m, k):
+    if get_compute_capability(torch.device("cuda"))[0] != 12:
+        pytest.skip("SM120/SM121 only")
+    n = 256
+    input_fp8 = torch.zeros([1, m, k], device="cuda").to(torch.float8_e4m3fn)
+    mat2_fp8 = torch.zeros([1, n, k], device="cuda").to(torch.float8_e4m3fn)
+    scale = torch.ones(1, device="cuda")
+    res = torch.full([1, m, n], float("nan"), device="cuda", dtype=torch.bfloat16)
+    bmm_fp8(
+        input_fp8,
+        mat2_fp8.transpose(-2, -1),
+        scale,
+        scale,
+        torch.bfloat16,
+        res,
+        backend="cutlass",
+    )
+    assert torch.equal(res, torch.zeros_like(res))
 
 
 if __name__ == "__main__":
