@@ -52,9 +52,11 @@ CutlassGemmConfig getFp8GemmConfigSm120(int64_t m, int64_t n, int64_t b, int dev
                                         int64_t tactic) {
   if (tactic == -1) {
     int sm_count = 0;
+    int cc_minor = 0;
     cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device_id);
+    cudaDeviceGetAttribute(&cc_minor, cudaDevAttrComputeCapabilityMinor, device_id);
     return CutlassGemmConfig(
-        CutlassFp8GemmRunnerSm120<__nv_bfloat16>::heuristicTile(m, n, b, sm_count),
+        CutlassFp8GemmRunnerSm120<__nv_bfloat16>::heuristicTile(m, n, b, sm_count, cc_minor == 1),
         MainloopScheduleType::AUTO, EpilogueScheduleType::AUTO, ClusterShape::ClusterShape_1x1x1,
         /*swap_ab*/ false);
   }

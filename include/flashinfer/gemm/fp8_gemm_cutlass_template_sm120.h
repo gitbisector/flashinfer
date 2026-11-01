@@ -132,24 +132,28 @@ class CutlassFp8GemmRunnerSm120 : public virtual CutlassFp8GemmRunnerInterface {
   // (shape, M) points from M = 1 to 4096 (geomean 0.3%), and within 10% when fitted on half
   // the shapes and checked on the other half. Wave counting is what matters: a 128x128 tile
   // leaves most SMs idle when M * N / (128 * 128) is below the SM count, as at decode M.
-  static CutlassTileConfigSM120 heuristicTile(int m, int n, int b, int sm_count) {
+  // SM121 (GB10, LPDDR5X) has its own costs, fitted the same way on GB10 over ten shapes and
+  // M = 1 to 2048 (median of three runs): with the RTX 5090 costs, 128x64 was picked over a
+  // faster 128x128 at prefill M (up to 1.6x slower); with these the pick is within 7% of the
+  // fastest tile everywhere (geomean 0.8%), and within 8% on held-out shapes.
+  static CutlassTileConfigSM120 heuristicTile(int m, int n, int b, int sm_count, bool sm121) {
     struct Candidate {
       CutlassTileConfigSM120 tile;
-      int cta_m, cta_n, wave_cost;
+      int cta_m, cta_n, wave_cost, wave_cost_sm121;
     };
     static constexpr Candidate kCandidates[] = {
-        {CutlassTileConfigSM120::CtaShape16x64x128B, 16, 64, 6},
-        {CutlassTileConfigSM120::CtaShape32x64x128B, 32, 64, 7},
-        {CutlassTileConfigSM120::CtaShape64x64x128B, 64, 64, 10},
-        {CutlassTileConfigSM120::CtaShape128x64x128B, 128, 64, 18},
-        {CutlassTileConfigSM120::CtaShape128x128x128B, 128, 128, 35},
+        {CutlassTileConfigSM120::CtaShape16x64x128B, 16, 64, 6, 4},
+        {CutlassTileConfigSM120::CtaShape32x64x128B, 32, 64, 7, 7},
+        {CutlassTileConfigSM120::CtaShape64x64x128B, 64, 64, 10, 12},
+        {CutlassTileConfigSM120::CtaShape128x64x128B, 128, 64, 18, 21},
+        {CutlassTileConfigSM120::CtaShape128x128x128B, 128, 128, 35, 35},
     };
     sm_count = std::max(sm_count, 1);
     CutlassTileConfigSM120 best_tile = kCandidates[0].tile;
     int64_t best_cost = -1;
     for (auto const& c : kCandidates) {
       int64_t ctas = int64_t(b) * ((m + c.cta_m - 1) / c.cta_m) * ((n + c.cta_n - 1) / c.cta_n);
-      int64_t cost = (ctas + sm_count - 1) / sm_count * c.wave_cost;
+      int64_t cost = (ctas + sm_count - 1) / sm_count * (sm121 ? c.wave_cost_sm121 : c.wave_cost);
       if (best_cost < 0 || cost < best_cost) {
         best_cost = cost;
         best_tile = c.tile;
