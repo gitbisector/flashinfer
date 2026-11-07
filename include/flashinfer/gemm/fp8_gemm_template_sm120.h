@@ -143,6 +143,13 @@ size_t genericFp8GemmKernelLauncherSm120(__nv_fp8_e4m3 const* A, __nv_fp8_e4m3 c
       {}  // multiplies
   };
 
+  // Swizzle the tile order once the grid is tall enough to pay for it: on GB10 at M = 4096 it
+  // makes the 128x128 tile up to 2.3x faster with large K, but at around 8 M tiles it costs up
+  // to 17%.
+  if ((m + CTA_M_ - 1) / CTA_M_ >= 16) {
+    arguments.scheduler.max_swizzle_size = 8;
+  }
+
   Gemm gemm;
 
   // Return workspace size
