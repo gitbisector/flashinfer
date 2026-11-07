@@ -132,18 +132,19 @@ class CutlassFp8GemmRunnerSm120 : public virtual CutlassFp8GemmRunnerInterface {
   // (shape, M) points from M = 1 to 4096 (geomean 0.3%), and within 10% when fitted on half
   // the shapes and checked on the other half. Wave counting is what matters: a 128x128 tile
   // leaves most SMs idle when M * N / (128 * 128) is below the SM count, as at decode M.
-  // SM121 (GB10, LPDDR5X) has its own costs, fitted the same way on GB10 over ten shapes and
-  // M = 1 to 2048 (median of three runs): with the RTX 5090 costs, 128x64 was picked over a
-  // faster 128x128 at prefill M (up to 1.6x slower); with these the pick is within 7% of the
-  // fastest tile everywhere (geomean 0.8%), and within 8% on held-out shapes.
+  // SM121 (GB10, LPDDR5X) has its own costs, fitted on GB10 over ten shapes at 88 values of M
+  // from 1 to 4096, every 16 up to 1024 (median of three runs): with the RTX 5090 costs, 128x64
+  // was picked over a faster 128x128 at prefill M (up to 1.6x slower); with these the pick is
+  // within 7% of the fastest tile at 878 of the 880 points (worst 12.6%, geomean 0.5%). Ties
+  // keep the smaller tile, which is the faster one on GB10 at most of them.
   static CutlassTileConfigSM120 heuristicTile(int m, int n, int b, int sm_count, bool sm121) {
     struct Candidate {
       CutlassTileConfigSM120 tile;
       int cta_m, cta_n, wave_cost, wave_cost_sm121;
     };
     static constexpr Candidate kCandidates[] = {
-        {CutlassTileConfigSM120::CtaShape16x64x128B, 16, 64, 6, 4},
-        {CutlassTileConfigSM120::CtaShape32x64x128B, 32, 64, 7, 7},
+        {CutlassTileConfigSM120::CtaShape16x64x128B, 16, 64, 6, 5},
+        {CutlassTileConfigSM120::CtaShape32x64x128B, 32, 64, 7, 10},
         {CutlassTileConfigSM120::CtaShape64x64x128B, 64, 64, 10, 12},
         {CutlassTileConfigSM120::CtaShape128x64x128B, 128, 64, 18, 21},
         {CutlassTileConfigSM120::CtaShape128x128x128B, 128, 128, 35, 35},
